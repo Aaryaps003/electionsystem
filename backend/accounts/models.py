@@ -20,6 +20,7 @@ class User(AbstractUser):
         return f"{self.username} ({self.role})"
 
 
+
 class StudentProfile(models.Model):
     user = models.OneToOneField(
         User,
@@ -28,7 +29,15 @@ class StudentProfile(models.Model):
     )
     student_id = models.CharField(max_length=30, unique=True)
     department = models.CharField(max_length=100, blank=True)
-    year_of_study = models.PositiveSmallIntegerField(null=True, blank=True)
+    year_of_study = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+    )
+
+    # NEW: academic grouping for section-based voting
+    class_name = models.CharField(max_length=100, blank=True)
+    section = models.CharField(max_length=20, blank=True)
 
     def __str__(self):
         return f"{self.student_id} - {self.user.username}"
+

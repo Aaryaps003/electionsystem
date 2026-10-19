@@ -48,6 +48,13 @@ class Candidate(models.Model):
         on_delete=models.CASCADE,
         related_name="candidates",
     )
+    student = models.ForeignKey(
+        "accounts.StudentProfile",
+        on_delete=models.PROTECT,
+        related_name="candidate_entries",
+        null=True,
+        blank=True,
+    )
     name = models.CharField(max_length=150)
     manifesto = models.TextField(blank=True)
     photo_url = models.URLField(blank=True)

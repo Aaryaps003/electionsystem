@@ -1,13 +1,13 @@
-
+ 
 from datetime import timedelta
 
 from django.test import TestCase
 from django.utils import timezone
 
-from accounts.models import User
+from accounts.models import User, StudentProfile
 from elections.models import Election, Candidate, EligibleVoter
 from voting.models import Ballot, VoterParticipation
-from voting.services import cast_vote
+from voting.services import cast_vote, VoteRejected
 from audit.models import AuditEvent
 from audit.services import create_audit_event, verify_audit_chain
 
@@ -31,6 +31,31 @@ class AuditChainTests(TestCase):
             role=User.Role.VOTER,
         )
 
+        self.voter_profile = StudentProfile.objects.create(
+            user=self.voter,
+            student_id="AUDITVOTER001",
+            department="MCA",
+            year_of_study=1,
+            class_name="MCA FY",
+            section="A",
+        )
+
+        self.candidate_user = User.objects.create_user(
+            username="audit_candidate",
+            email="audit_candidate@example.com",
+            password="TestCandidatePass123!",
+            role=User.Role.VOTER,
+        )
+
+        self.candidate_profile = StudentProfile.objects.create(
+            user=self.candidate_user,
+            student_id="AUDITCAND001",
+            department="MCA",
+            year_of_study=1,
+            class_name="MCA FY",
+            section="A",
+        )
+
         self.election = Election.objects.create(
             title="Audit Test Election",
             start_time=now - timedelta(hours=1),
@@ -41,6 +66,7 @@ class AuditChainTests(TestCase):
 
         self.candidate = Candidate.objects.create(
             election=self.election,
+            student=self.candidate_profile,
             name="Audit Candidate",
         )
 
@@ -64,7 +90,6 @@ class AuditChainTests(TestCase):
         )
 
         result = verify_audit_chain()
-
         self.assertTrue(result["valid"], result)
 
     def test_each_event_links_to_previous_hash(self):
@@ -89,7 +114,6 @@ class AuditChainTests(TestCase):
             metadata={"status": "original"},
         )
 
-        # Bypass the model's instance-level save protection deliberately.
         AuditEvent.objects.filter(pk=event.pk).update(
             metadata={"status": "modified"}
         )
@@ -118,14 +142,12 @@ class AuditChainTests(TestCase):
         result = verify_audit_chain()
         self.assertTrue(result["valid"], result)
 
-
     def test_event_hash_tampering_is_detected(self):
         event = create_audit_event(
             event_type="HASH_TAMPER_TEST",
             metadata={"status": "original"},
         )
 
-        # Deliberately bypass model-level immutability for testing.
         AuditEvent.objects.filter(pk=event.pk).update(
             event_hash="f" * 64
         )
@@ -137,7 +159,7 @@ class AuditChainTests(TestCase):
         self.assertEqual(result["reason"], "Event hash mismatch")
 
     def test_previous_hash_mismatch_is_detected(self):
-        first = create_audit_event(
+        create_audit_event(
             event_type="CHAIN_FIRST",
             metadata={"sequence": 1},
         )
@@ -147,7 +169,6 @@ class AuditChainTests(TestCase):
             metadata={"sequence": 2},
         )
 
-        # Deliberately corrupt the link for this test.
         AuditEvent.objects.filter(pk=second.pk).update(
             previous_hash="f" * 64
         )
@@ -158,3 +179,62 @@ class AuditChainTests(TestCase):
         self.assertEqual(result["event_id"], second.pk)
         self.assertEqual(result["reason"], "Previous hash mismatch")
 
+    def test_rejected_cross_section_vote_is_audited(self):
+        section_b_user = User.objects.create_user(
+            username="audit_section_b_candidate",
+            email="audit_section_b_candidate@example.com",
+            password="TestCandidatePass123!",
+            role=User.Role.VOTER,
+        )
+
+        section_b_profile = StudentProfile.objects.create(
+            user=section_b_user,
+            student_id="AUDITCAND002",
+            department="MCA",
+            year_of_study=1,
+            class_name="MCA FY",
+            section="B",
+        )
+
+        section_b_candidate = Candidate.objects.create(
+            election=self.election,
+            student=section_b_profile,
+            name="Section B Candidate",
+        )
+
+        with self.assertRaises(VoteRejected):
+            cast_vote(
+                voter=self.voter,
+                election_id=self.election.pk,
+                candidate_id=section_b_candidate.pk,
+            )
+
+        # The rejected attempt must not create a ballot.
+        self.assertEqual(Ballot.objects.count(), 0)
+
+        # The rejection event must survive the vote transaction rollback.
+        event = AuditEvent.objects.get(
+            event_type="CROSS_SECTION_VOTE_REJECTED"
+        )
+
+        self.assertEqual(event.election_id, self.election.pk)
+        self.assertIsNone(event.actor_id)
+        self.assertEqual(
+            event.metadata,
+            {
+                "result": "rejected",
+                "reason": "section_mismatch",
+            },
+        )
+
+        # The voter must still be able to vote for a valid candidate.
+        participation = VoterParticipation.objects.get(
+            election=self.election,
+            voter=self.voter,
+        )
+        self.assertFalse(participation.has_voted)
+
+        # Rejection logging must preserve the hash chain.
+        result = verify_audit_chain()
+        self.assertTrue(result["valid"], result)
+ 

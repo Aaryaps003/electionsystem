@@ -1,10 +1,20 @@
-
-from rest_framework import serializers
+﻿from rest_framework import serializers
 
 from .models import Election, Candidate
 
 
 class CandidateSerializer(serializers.ModelSerializer):
+    class_name = serializers.CharField(
+        source="student.class_name",
+        read_only=True,
+        allow_null=True,
+    )
+    section = serializers.CharField(
+        source="student.section",
+        read_only=True,
+        allow_null=True,
+    )
+
     class Meta:
         model = Candidate
         fields = [
@@ -13,6 +23,8 @@ class CandidateSerializer(serializers.ModelSerializer):
             "name",
             "manifesto",
             "photo_url",
+            "class_name",
+            "section",
             "created_at",
         ]
         read_only_fields = fields

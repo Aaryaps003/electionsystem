@@ -1,4 +1,4 @@
-
+﻿ 
 from datetime import timedelta
 
 from django.test import TestCase
@@ -8,10 +8,12 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from accounts.models import User
+from accounts.models import User, StudentProfile
 from elections.models import Election, Candidate, EligibleVoter
 from voting.models import Ballot, VoterParticipation
 from voting.services import cast_vote, VoteRejected
+from audit.models import AuditEvent
+from audit.services import verify_audit_chain
 
 
 class CastVoteTests(TestCase):
@@ -40,6 +42,33 @@ class CastVoteTests(TestCase):
             role=User.Role.VOTER,
         )
 
+        # Voter: MCA FY, Section A
+        self.voter_profile = StudentProfile.objects.create(
+            user=self.voter,
+            student_id="VOTER001",
+            department="MCA",
+            year_of_study=1,
+            class_name="MCA FY",
+            section="A",
+        )
+
+        # Candidate: MCA FY, Section A
+        self.candidate_user = User.objects.create_user(
+            username="candidate_test",
+            email="candidate@example.com",
+            password="TestCandidatePass123!",
+            role=User.Role.VOTER,
+        )
+
+        self.candidate_profile = StudentProfile.objects.create(
+            user=self.candidate_user,
+            student_id="CAND001",
+            department="MCA",
+            year_of_study=1,
+            class_name="MCA FY",
+            section="A",
+        )
+
         self.election = Election.objects.create(
             title="Test Election",
             description="Election for automated tests",
@@ -51,11 +80,13 @@ class CastVoteTests(TestCase):
 
         self.candidate = Candidate.objects.create(
             election=self.election,
+            student=self.candidate_profile,
             name="Candidate A",
         )
 
         self.other_candidate = Candidate.objects.create(
             election=self.election,
+            student=self.candidate_profile,
             name="Candidate B",
         )
 
@@ -115,6 +146,7 @@ class CastVoteTests(TestCase):
 
         foreign_candidate = Candidate.objects.create(
             election=another_election,
+            student=self.candidate_profile,
             name="Foreign Candidate",
         )
 
@@ -156,6 +188,45 @@ class CastVoteTests(TestCase):
 
         self.assertEqual(Ballot.objects.count(), 1)
 
+    def test_voter_cannot_vote_for_candidate_from_another_section(self):
+        section_b_user = User.objects.create_user(
+            username="section_b_candidate",
+            email="section_b_candidate@example.com",
+            password="TestCandidatePass123!",
+            role=User.Role.VOTER,
+        )
+
+        section_b_profile = StudentProfile.objects.create(
+            user=section_b_user,
+            student_id="CAND002",
+            department="MCA",
+            year_of_study=1,
+            class_name="MCA FY",
+            section="B",
+        )
+
+        section_b_candidate = Candidate.objects.create(
+            election=self.election,
+            student=section_b_profile,
+            name="Section B Candidate",
+        )
+
+        with self.assertRaises(VoteRejected):
+            cast_vote(
+                voter=self.voter,
+                election_id=self.election.id,
+                candidate_id=section_b_candidate.id,
+            )
+
+        self.assertEqual(Ballot.objects.count(), 0)
+
+        participation = VoterParticipation.objects.get(
+            election=self.election,
+            voter=self.voter,
+        )
+
+        self.assertFalse(participation.has_voted)
+
 
 class VotingAPITests(APITestCase):
 
@@ -183,6 +254,33 @@ class VotingAPITests(APITestCase):
             role=User.Role.VOTER,
         )
 
+        # Voter: MCA FY, Section A
+        self.voter_profile = StudentProfile.objects.create(
+            user=self.voter,
+            student_id="APIVOTER001",
+            department="MCA",
+            year_of_study=1,
+            class_name="MCA FY",
+            section="A",
+        )
+
+        # Candidate: MCA FY, Section A
+        self.candidate_user = User.objects.create_user(
+            username="api_candidate",
+            email="api_candidate@example.com",
+            password="TestCandidatePass123!",
+            role=User.Role.VOTER,
+        )
+
+        self.candidate_profile = StudentProfile.objects.create(
+            user=self.candidate_user,
+            student_id="APICAND001",
+            department="MCA",
+            year_of_study=1,
+            class_name="MCA FY",
+            section="A",
+        )
+
         self.election = Election.objects.create(
             title="API Test Election",
             start_time=now - timedelta(hours=1),
@@ -193,6 +291,7 @@ class VotingAPITests(APITestCase):
 
         self.candidate = Candidate.objects.create(
             election=self.election,
+            student=self.candidate_profile,
             name="API Candidate",
         )
 
@@ -257,6 +356,7 @@ class VotingAPITests(APITestCase):
         self.assertEqual(
             response.status_code,
             status.HTTP_201_CREATED,
+            response.data,
         )
         self.assertEqual(Ballot.objects.count(), 1)
 
@@ -280,10 +380,12 @@ class VotingAPITests(APITestCase):
         self.assertEqual(
             first_response.status_code,
             status.HTTP_201_CREATED,
+            first_response.data,
         )
         self.assertEqual(
             second_response.status_code,
             status.HTTP_400_BAD_REQUEST,
+            second_response.data,
         )
         self.assertEqual(Ballot.objects.count(), 1)
 
@@ -328,3 +430,75 @@ class VotingAPITests(APITestCase):
             response.status_code,
             status.HTTP_404_NOT_FOUND,
         )
+
+    def test_api_rejects_candidate_from_another_section(self):
+        section_b_user = User.objects.create_user(
+            username="api_section_b_candidate",
+            email="api_section_b_candidate@example.com",
+            password="TestCandidatePass123!",
+            role=User.Role.VOTER,
+        )
+
+        section_b_profile = StudentProfile.objects.create(
+            user=section_b_user,
+            student_id="APISECCAND002",
+            department="MCA",
+            year_of_study=1,
+            class_name="MCA FY",
+            section="B",
+        )
+
+        section_b_candidate = Candidate.objects.create(
+            election=self.election,
+            student=section_b_profile,
+            name="API Section B Candidate",
+        )
+
+        self.authenticate_as(self.voter)
+
+        payload = {
+            "election_id": self.election.id,
+            "candidate_id": section_b_candidate.id,
+        }
+
+        response = self.client.post(
+            self.vote_url,
+            payload,
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            response.data,
+        )
+
+        self.assertEqual(Ballot.objects.count(), 0)
+
+        participation = VoterParticipation.objects.get(
+            election=self.election,
+            voter=self.voter,
+        )
+
+        self.assertFalse(participation.has_voted)
+
+        # The API rejection must be recorded without voter or candidate identity.
+        event = AuditEvent.objects.get(
+            event_type="CROSS_SECTION_VOTE_REJECTED"
+        )
+        self.assertEqual(event.election_id, self.election.pk)
+        self.assertIsNone(event.actor_id)
+        self.assertEqual(
+            event.metadata,
+            {
+                "result": "rejected",
+                "reason": "section_mismatch",
+            },
+        )
+        self.assertNotIn("voter_id", event.metadata)
+        self.assertNotIn("candidate_id", event.metadata)
+
+        # The rejection event must preserve the audit hash chain.
+        chain_result = verify_audit_chain()
+        self.assertTrue(chain_result["valid"], chain_result)
+ 

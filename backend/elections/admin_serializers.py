@@ -1,6 +1,6 @@
+﻿from rest_framework import serializers
 
-from rest_framework import serializers
-
+from accounts.models import StudentProfile
 from .models import Election, Candidate
 
 
@@ -29,11 +29,21 @@ class ElectionCreateSerializer(serializers.ModelSerializer):
 
 
 class CandidateCreateSerializer(serializers.ModelSerializer):
+    student_profile_id = serializers.PrimaryKeyRelatedField(
+        source="student",
+        queryset=StudentProfile.objects.select_related("user").filter(
+            user__role="VOTER",
+            user__is_active=True,
+        ),
+        write_only=True,
+    )
+
     class Meta:
         model = Candidate
         fields = [
             "id",
             "election",
+            "student_profile_id",
             "name",
             "manifesto",
             "photo_url",
@@ -47,3 +57,29 @@ class CandidateCreateSerializer(serializers.ModelSerializer):
             )
 
         return election
+
+    def validate(self, attrs):
+        student_profile = attrs.get("student")
+
+        if student_profile is None:
+            raise serializers.ValidationError({
+                "student_profile_id": (
+                    "A registered student profile is required."
+                )
+            })
+
+        if not student_profile.class_name.strip():
+            raise serializers.ValidationError({
+                "student_profile_id": (
+                    "The student's class must be configured."
+                )
+            })
+
+        if not student_profile.section.strip():
+            raise serializers.ValidationError({
+                "student_profile_id": (
+                    "The student's section must be configured."
+                )
+            })
+
+        return attrs
