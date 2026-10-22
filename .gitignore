@@ -2,6 +2,12 @@
 __pycache__/
 *.py[cod]
 .env
+.env.*
+!.env.example
 db.sqlite3
-.DS_Store
 *.sqlite3
+.DS_Store
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
